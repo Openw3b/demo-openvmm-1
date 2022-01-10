@@ -54,7 +54,7 @@ impl XVsockServer {
     }
 
     pub async fn get_main_window(&self, config: &Mutex<AppConfig>) {
-        thread::sleep(time::Duration::from_millis(2000));
+        thread::sleep(time::Duration::from_millis(6000));
         let output = window::search(config.lock().unwrap().display.main_window.as_str(), option_vec![
             SearchOption::OnlyVisible,
             SearchOption::Name
