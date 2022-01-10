@@ -1,0 +1,36 @@
+version: 1
+kind: "appvm"
+name: "vlc"
+vcpu_count: 8
+memory: 2048
+
+# Uncomment for static CID
+# vm_cid: 1001
+
+rootfs:
+  path: "./config/guestfs/rootfs.qcow2"
+  # Not implemented
+  format: "qcow2"
+  name: "vlc-ubuntu"
+  version: "0.1"
+
+display:
+  main_window: "vlc"
+
+mounts:
+  - ./target/debug/openosguest
+  - $ARGS[:]
+
+params:
+  - "OPENVM_LAUNCH=vlc"
+  - $MOUNTS[1:]
+
+networks:
+  # - kind: "netvm"
+  #   name: "pass"
+  - kind: "host"
+    tap_ifname: "vmtap_vlc"
+
+permissions:
+  - kind: "sound"
+    value: "allow"

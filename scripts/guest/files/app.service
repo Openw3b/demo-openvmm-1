@@ -1,0 +1,11 @@
+[Unit]
+Description=Start GUI Application
+
+[Service]
+Type=simple
+User=user
+ExecStart=/usr/bin/startx i3
+
+[Install]
+After=getty@tty1.service
+WantedBy=multi-user.target

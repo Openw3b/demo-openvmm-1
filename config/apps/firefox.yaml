@@ -1,0 +1,32 @@
+version: 1
+kind: "appvm"
+name: "firefox"
+
+rootfs:
+  format: "qcow2"
+  name: "firefox-ubuntu"
+  version: "0.1"
+  path: "./config/guestfs/rootfs.qcow2"
+
+mounts:
+  - ./target/debug/openosguest
+
+params:
+  # - "OPENVM_LAUNCH=xterm -fa 'Monospace' -fs 14"
+  - "OPENVM_LAUNCH=firefox"
+
+vcpu_count: 8
+memory: 2048
+
+display:
+  main_window: "firefox"
+
+networks:
+  # - kind: "netvm"
+  #   name: "pass"
+  - kind: "host"
+    tap_ifname: "vmtap_firefox"
+
+permissions:
+  - kind: "sound"
+    value: "allow"

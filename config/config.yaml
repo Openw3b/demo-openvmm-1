@@ -1,0 +1,12 @@
+# OpenVMM Config
+dependencies:
+  socat: "/tmp/socat-1.7.4.2/socat"
+  netutil: "./target/debug/opennetutil"
+
+app:
+  kernel_path: "./config/kernel/bzImage"
+  vm_init: "/init"
+  mount_base: "/mnt"
+
+server:
+  port: 8002

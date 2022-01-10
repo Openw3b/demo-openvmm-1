@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+set -ex
+
+sudo apt-get update
+sudo apt-get install --yes --no-install-recommends \
+    ca-certificates \
+    clang \
+    cloud-image-utils \
+    curl \
+    dpkg-dev \
+    expect \
+    g++ \
+    gcc \
+    git \
+    jq \
+    libasound2-dev \
+    libcap-dev \
+    libclang-dev \
+    libdbus-1-dev \
+    libdrm-dev \
+    libepoxy-dev \
+    libssl-dev \
+    libwayland-dev \
+    libxext-dev \
+    make \
+    nasm \
+    ninja-build \
+    openssh-client \
+    pkg-config \
+    protobuf-compiler \
+    python3 \
+    python3-pip \
+    python3-setuptools \
+    qemu-system-x86 \
+    rsync \
+    screen \
+    wayland-protocols
+
+sudo apt-get install --yes --no-install-recommends \
+    libxcb-randr0-dev libxcb-xtest0-dev \
+    libxcb-xinerama0-dev libxcb-shape0-dev libxcb-xkb-dev \
+    libxcb-xfixes0-dev \
+    uml-utilities iproute2 bridge-utils iptables \
+    xauth x11-apps libguestfs-tools
+
+
+# Install meson for rutabaga_gfx
+pip3 install meson
+
+rustup component add clippy
+rustup component add rustfmt
+
+# The bindgen tool is required to build a crosvm dependency.
+# cargo install bindgen

@@ -1,0 +1,346 @@
+diff --git a/common/p9/src/server/mod.rs b/common/p9/src/server/mod.rs
+index cbba232e..b178bf84 100644
+--- a/common/p9/src/server/mod.rs
++++ b/common/p9/src/server/mod.rs
+@@ -328,7 +328,7 @@ fn open_fid(proc: &File, path: &File, p9_flags: u32) -> io::Result<File> {
+     Ok(unsafe { File::from_raw_fd(fd) })
+ }
+ 
+-#[derive(Clone)]
++#[derive(Clone, Debug)]
+ pub struct Config {
+     pub root: Box<Path>,
+     pub msize: u32,
+diff --git a/gpu_display/Cargo.toml b/gpu_display/Cargo.toml
+index d5aa36dc..3eca036d 100644
+--- a/gpu_display/Cargo.toml
++++ b/gpu_display/Cargo.toml
+@@ -12,8 +12,15 @@ data_model = { path = "../common/data_model" }
+ libc = "*"
+ base = { path = "../common/base" }
+ linux_input_sys = { path = "../linux_input_sys" }
++sys_util = { path = "../common/sys_util" }
+ remain = "*"
+ thiserror = "*"
++strum = "0.13.0"
++strum_macros = "0.13.0"
++bincode = "1.3.3"
++serde = { version = "1.0", features = ["derive"] }
++x11-clipboard = "0.5.3"
++tokio = { version = "0.2", features=["full"] }
+ 
+ [build-dependencies]
+ cc = "1.0.25"
+diff --git a/gpu_display/src/generated/xlib.rs b/gpu_display/src/generated/xlib.rs
+index 4e773a8e..ddbe9f8e 100644
+--- a/gpu_display/src/generated/xlib.rs
++++ b/gpu_display/src/generated/xlib.rs
+@@ -17,6 +17,8 @@ extern "C" {}
+ pub const KeyPressMask: u32 = 1;
+ pub const KeyReleaseMask: u32 = 2;
+ pub const ButtonPressMask: u32 = 4;
++// Akram: Added to support resize events
++pub const StructureNotifyMask: u32 = 0x0002_0000;
+ pub const ButtonReleaseMask: u32 = 8;
+ pub const PointerMotionMask: u32 = 64;
+ pub const ExposureMask: u32 = 32768;
+@@ -27,6 +29,8 @@ pub const ButtonRelease: u32 = 5;
+ pub const MotionNotify: u32 = 6;
+ pub const Expose: u32 = 12;
+ pub const ClientMessage: u32 = 33;
++// Akram: Added to support resize events
++pub const ConfigureNotify: u32 = 22;
+ pub const Button1Mask: u32 = 256;
+ pub const Button1: u32 = 1;
+ pub const ZPixmap: u32 = 2;
+@@ -2109,7 +2113,7 @@ pub struct _XImage_funcs {
+ pub type XImage = _XImage;
+ pub type Display = _XDisplay;
+ #[repr(C)]
+-#[derive(Copy, Clone)]
++#[derive(Copy, Clone, Debug)]
+ pub struct XKeyEvent {
+     pub type_: ::std::os::raw::c_int,
+     pub serial: ::std::os::raw::c_ulong,
+diff --git a/gpu_display/src/gpu_display_x.rs b/gpu_display/src/gpu_display_x.rs
+index 41e9785a..1b75c521 100644
+--- a/gpu_display/src/gpu_display_x.rs
++++ b/gpu_display/src/gpu_display_x.rs
+@@ -11,13 +11,20 @@
+ )]
+ mod xlib;
+ 
++#[path = "../../../../common/xvsock.rs"]
++mod xvsock;
++
++use xvsock::XVsockEventEnum;
++
+ use linux_input_sys::virtio_input_event;
+ use std::cmp::max;
+ use std::ffi::{c_void, CStr, CString};
++use std::io::Read;
+ use std::mem::{transmute_copy, zeroed};
+ use std::os::raw::c_ulong;
+ use std::ptr::{null, null_mut, NonNull};
+ use std::rc::Rc;
++use serde::{Serialize, Deserialize};
+ 
+ use libc::{shmat, shmctl, shmdt, shmget, IPC_CREAT, IPC_PRIVATE, IPC_RMID};
+ 
+@@ -30,6 +37,8 @@ use crate::{
+ use base::{AsRawDescriptor, RawDescriptor};
+ use data_model::VolatileSlice;
+ 
++use self::xlib::XKeyEvent;
++
+ const BUFFER_COUNT: usize = 2;
+ 
+ /// A wrapper for XFree that takes any type.
+@@ -131,6 +140,9 @@ impl XEvent {
+             xlib::ClientMessage => {
+                 XEventEnum::ClientMessage(unsafe { self.0.xclient.data.l[0] as u64 })
+             }
++            xlib::ConfigureNotify => {
++                XEventEnum::ConfigureNotify(unsafe { self.0.xconfigure })
++            }
+             t if t == shm_complete_type => {
+                 // Because XShmCompletionEvent is not part of the XEvent union, simulate a union
+                 // with transmute_copy. If the shm_complete_type turns out to be bogus, some of the
+@@ -152,6 +164,7 @@ enum XEventEnum {
+     Motion(xlib::XMotionEvent),
+     Expose,
+     ClientMessage(u64),
++    ConfigureNotify(xlib::XConfigureEvent),
+     ShmCompletionEvent(xlib::ShmSeg),
+     // We don't care about most kinds of events,
+     Unhandled,
+@@ -401,6 +414,7 @@ pub struct DisplayX {
+     visual: *mut xlib::Visual,
+     keycode_translator: KeycodeTranslator,
+     current_event: Option<XEvent>,
++    xvsock: xvsock::XVsock
+ }
+ 
+ impl DisplayX {
+@@ -465,12 +479,14 @@ impl DisplayX {
+             let visual = (*visual_info).visual;
+             x_free(visual_info);
+ 
++            let xvsock = xvsock::XVsock::new();
+             Ok(DisplayX {
+                 display,
+                 screen,
+                 visual,
+                 keycode_translator,
+                 current_event: None,
++                xvsock
+             })
+         }
+     }
+@@ -499,8 +515,35 @@ impl DisplayT for DisplayX {
+         // Should not panic since the common layer only calls this when an event exists.
+         let ev = self.current_event.take().unwrap();
+ 
+-        match ev.as_enum(surface.buffer_completion_type()) {
++        let event_enum = ev.as_enum(surface.buffer_completion_type());
++        match event_enum {
+             XEventEnum::KeyEvent(key) => {
++                // println!("KeyEvent (state: {}, keycode: {})", key.state, key.keycode);
++                match &key {
++                    // TODO: Add Key bindings for ctrl+Shift+(c,v)
++                    // Ctrl-C
++                    XKeyEvent { state: 20, keycode: 54, type_: 3,.. } => {
++                        println!("Ctrl-C");
++                        self.xvsock.send(&XVsockEventEnum::ClipboardRequestEvent {});
++                        match self.xvsock.read_event() {
++                            XVsockEventEnum::ClipboardUpdateRequest {buf} => {
++                                println!("Updating Clipboard buffer {:?}", buf);
++                                self.xvsock.update_clipboard(buf);
++                            },
++                            _ => println!("Unknown event received")
++                        }
++                        // Do not send event
++                        return None;
++                    },
++                    // Ctrl-V
++                    XKeyEvent { state: 20, keycode: 55, type_: 3,.. } => {
++                        println!("Ctrl-V");
++                        self.xvsock.send_clipboard(false);
++                        // Do not send event
++                        return None;
++                    },
++                    _ => {}
++                };
+                 if let Some(linux_keycode) = self.keycode_translator.translate(key.keycode) {
+                     let events = vec![virtio_input_event::key(
+                         linux_keycode,
+@@ -517,34 +560,19 @@ impl DisplayT for DisplayX {
+                 event: button_event,
+                 pressed,
+             } => {
+-                // We only support a single touch from button 1 (left mouse button).
+-                if button_event.button & xlib::Button1 != 0 {
+-                    // The touch event *must* be first per the Linux input subsystem's guidance.
+-                    let events = vec![
+-                        virtio_input_event::touch(pressed),
+-                        virtio_input_event::absolute_x(max(0, button_event.x)),
+-                        virtio_input_event::absolute_y(max(0, button_event.y)),
+-                    ];
+ 
+-                    return Some(GpuDisplayEvents {
+-                        events,
+-                        device_type: EventDeviceKind::Touchscreen,
+-                    });
+-                }
++                self.xvsock.send(&XVsockEventEnum::ButtonEvent {
++                    x: max(0,button_event.x as u16),
++                    y: max(0,button_event.y as u16),
++                    button: button_event.button as u16,
++                    pressed
++                });
+             }
+             XEventEnum::Motion(motion) => {
+-                if motion.state & xlib::Button1Mask != 0 {
+-                    let events = vec![
+-                        virtio_input_event::touch(true),
+-                        virtio_input_event::absolute_x(max(0, motion.x)),
+-                        virtio_input_event::absolute_y(max(0, motion.y)),
+-                    ];
+-
+-                    return Some(GpuDisplayEvents {
+-                        events,
+-                        device_type: EventDeviceKind::Touchscreen,
+-                    });
+-                }
++                self.xvsock.send(&XVsockEventEnum::MotionEvent {
++                    x: max(0,motion.x as u16),
++                    y: max(0,motion.y as u16)
++                });
+             }
+             XEventEnum::Expose => surface.draw_current_buffer(),
+             XEventEnum::ClientMessage(xclient_data) => {
+@@ -555,6 +583,14 @@ impl DisplayT for DisplayX {
+                 surface.on_shm_completion(shmseg);
+                 return None;
+             }
++            XEventEnum::ConfigureNotify(xconfigure) => {
++
++                self.xvsock.send(&XVsockEventEnum::ConfigureEvent {
++                    width: xconfigure.width as u16,
++                    height: xconfigure.height as u16
++                });
++                return None;
++            }
+             XEventEnum::Unhandled => return None,
+         }
+ 
+@@ -583,8 +619,8 @@ impl DisplayT for DisplayX {
+                 xlib::XRootWindowOfScreen(self.screen.as_ptr()),
+                 0,
+                 0,
+-                width,
+-                height,
++                1920,
++                1080,
+                 1,
+                 black_pixel,
+                 black_pixel,
+@@ -608,10 +644,10 @@ impl DisplayT for DisplayX {
+ 
+             let size_hints = xlib::XAllocSizeHints();
+             (*size_hints).flags = (xlib::PMinSize | xlib::PMaxSize) as i64;
+-            (*size_hints).max_width = width as i32;
+-            (*size_hints).min_width = width as i32;
+-            (*size_hints).max_height = height as i32;
+-            (*size_hints).min_height = height as i32;
++            (*size_hints).max_width = (width) as i32;
++            (*size_hints).min_width = 100i32;
++            (*size_hints).max_height = (height) as i32;
++            (*size_hints).min_height = 100i32;
+             xlib::XSetWMNormalHints(self.display.as_ptr(), window, size_hints);
+             x_free(size_hints);
+ 
+@@ -624,7 +660,8 @@ impl DisplayT for DisplayX {
+                     | xlib::KeyReleaseMask
+                     | xlib::ButtonPressMask
+                     | xlib::ButtonReleaseMask
+-                    | xlib::PointerMotionMask) as i64,
++                    | xlib::PointerMotionMask
++                    | xlib::StructureNotifyMask) as i64,
+             );
+ 
+             xlib::XClearWindow(self.display.as_ptr(), window);
+diff --git a/gpu_display/src/keycode_converter/data.rs b/gpu_display/src/keycode_converter/data.rs
+index a54cf0e2..3051a703 100644
+--- a/gpu_display/src/keycode_converter/data.rs
++++ b/gpu_display/src/keycode_converter/data.rs
+@@ -489,13 +489,13 @@ pub const KEYCODE_MAP: [MapEntry; 88] = [
+         mac: 0x005f,
+     },
+     MapEntry {
+-        linux_keycode: 29,
++        linux_keycode: 29,      // ControlLeft
+         xkb: 0x0025,
+         win: 0x001d,
+         mac: 0x003b,
+     },
+     MapEntry {
+-        linux_keycode: 42,
++        linux_keycode: 42,      // ShiftLeft
+         xkb: 0x0032,
+         win: 0x002a,
+         mac: 0x0038,
+diff --git a/gpu_display/src/lib.rs b/gpu_display/src/lib.rs
+index e6522f76..11476314 100644
+--- a/gpu_display/src/lib.rs
++++ b/gpu_display/src/lib.rs
+@@ -5,6 +5,11 @@
+ //! Crate for displaying simple surfaces and GPU buffers over a low-level display backend such as
+ //! Wayland or X.
+ 
++// Strum contains all the trait definitions
++extern crate strum;
++#[macro_use]
++extern crate strum_macros;
++
+ use std::collections::BTreeMap;
+ use std::io::Error as IoError;
+ use std::path::Path;
+@@ -302,6 +307,8 @@ impl GpuDisplay {
+         let _ = display_name;
+         #[cfg(feature = "x")]
+         {
++            println!("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++Opening X window");
++
+             let display = match display_name {
+                 Some(s) => gpu_display_x::DisplayX::open_display(Some(s.as_ref()))?,
+                 None => gpu_display_x::DisplayX::open_display(None)?,
+@@ -388,7 +395,6 @@ impl GpuDisplay {
+                         if event_device.kind() != gpu_display_events.device_type {
+                             continue;
+                         }
+-
+                         event_device.send_report(gpu_display_events.events.iter().cloned())?;
+                     }
+                 }
+diff --git a/src/crosvm.rs b/src/crosvm.rs
+index 093cf713..35668806 100644
+--- a/src/crosvm.rs
++++ b/src/crosvm.rs
+@@ -158,7 +158,7 @@ impl TouchDeviceOption {
+     }
+ }
+ 
+-#[derive(Eq, PartialEq)]
++#[derive(Eq, PartialEq, Debug)]
+ pub enum SharedDirKind {
+     FS,
+     P9,
+@@ -183,6 +183,7 @@ impl Default for SharedDirKind {
+     }
+ }
+ 
++#[derive(Debug)]
+ pub struct SharedDir {
+     pub src: PathBuf,
+     pub tag: String,

@@ -1,0 +1,15 @@
+#!/bin/sh
+echo "Booting guestfs"
+echo "vm" > /etc/hostname
+echo "127.0.0.1    localhost vm" > /etc/hosts
+
+echo "root:password" | chpasswd
+echo "user:password" | chpasswd
+
+echo nameserver 1.1.1.1 > /etc/resolv.conf
+
+mount -t virtiofs shared /mnt
+mkdir /mnt/logs
+chown -R user:user /mnt
+
+exec /sbin/init

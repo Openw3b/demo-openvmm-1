@@ -1,0 +1,56 @@
+#!/bin/bash
+
+set -e
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+VERSION=0.0.1
+IMAGE_NAME=openvmm_dev
+
+export DEFAULT_IFACE=eth0
+DOCKER_RUN_ARGS=(
+    --interactive
+    --tty
+    # --volume "$(pwd):/workspace:rw"
+    # --mount "type=tmpfs,destination=/tmp"
+    --device "/dev/kvm"
+    --volume "/dev/log:/dev/log"
+    --device "/dev/net/tun"
+    --device "/dev/vhost-net"
+    --device "/dev/vhost-vsock"
+    
+    --ipc=host
+    -h $HOSTNAME
+    --env DISPLAY
+    --env DEFAULT_IFACE
+    --env USER=root
+    --env LIBGUESTFS_BACKEND=direct
+    --volume "/tmp/.X11-unix:/tmp/.X11-unix"
+    --volume "$(pwd)/config/guestfs:/workspace/config/guestfs"
+    --volume "/boot:/boot"
+    --volume "/lib/modules:/lib/modules"
+    --cap-add=NET_ADMIN
+    --user root
+    --privileged
+    "${IMAGE_NAME}:${VERSION}"
+)
+
+XAUTH_TOKEN="unix:0  MIT-MAGIC-COOKIE-1  $(xauth list | awk 'NR==1{print $3}')"
+GUESTFS="/workspace/config/guestfs"
+./scripts/build.sh $@
+
+ROOTFS="rootfs"
+if [ "$1" = "ubuntu" ]; then
+    ROOTFS="rootfs_os"
+elif [ "$1" = "vlc" ]; then
+    if [ ! -z "$2" ]; then
+        DOCKER_RUN_ARGS=( "--volume" "$2:$2" "${DOCKER_RUN_ARGS[@]}")
+    fi
+fi
+
+# RUN!!
+docker run --rm "${DOCKER_RUN_ARGS[@]}" bash -c "
+set -e
+[ -f '${GUESTFS}/${ROOTFS}.qcow2' ] || virt-make-fs --format=qcow2 --size=+1G ${GUESTFS}/${ROOTFS}.tar ${GUESTFS}/${ROOTFS}.qcow2
+touch /root/.Xauthority
+xauth add ${XAUTH_TOKEN}
+/workspace/target/debug/openos start $1 $2"

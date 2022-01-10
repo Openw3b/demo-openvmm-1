@@ -1,0 +1,5 @@
+target/
+.vscode/
+config/guestfs
+scripts
+!scripts/install-deps
